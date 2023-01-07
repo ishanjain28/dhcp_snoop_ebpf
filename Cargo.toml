@@ -1,0 +1,2 @@
+[workspace]
+members = ["dhcp", "dhcp-common", "xtask"]
