@@ -1,3 +1,4 @@
+#![feature(generic_arg_infer)]
 #![no_std]
 #![no_main]
 
@@ -94,64 +95,77 @@ fn try_dhcp(ctx: XdpContext) -> Result<u32, u32> {
         "{:x} {} -> {:x} {}", source_mac, source_port, destination_mac, destination_port
     );
 
-    let dhcp = ptr_at::<DhcpPacket>(&ctx, ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN)
-        .ok_or(xdp_action::XDP_PASS)?;
+    //    let dhcp = ptr_at::<DhcpPacket>(&ctx, ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN)
+    //        .ok_or(xdp_action::XDP_PASS)?;
 
-    info!(
-        &ctx,
-        "op = {} htype = {} hlen = {} hops = {}",
-        unsafe { (*dhcp).operation_type },
-        unsafe { (*dhcp).hardware_type },
-        unsafe { (*dhcp).hardware_address_length },
-        unsafe { (*dhcp).hops }
-    );
-    info!(&ctx, "txid = {:x}", unsafe {
-        (*dhcp).transaction_id.to_be()
-    },);
-    info!(
-        &ctx,
-        "secs = {} flags = {:x}",
-        unsafe { (*dhcp).seconds_elapsed },
-        unsafe { (*dhcp).flags }
-    );
-    info!(&ctx, "client address = {}", unsafe {
-        (*dhcp).client_address
-    });
-    info!(&ctx, "your address = {}", unsafe { (*dhcp).your_address },);
-    info!(&ctx, "next server address = {}", unsafe {
-        (*dhcp).next_server_address
-    });
-    info!(&ctx, "relay agent address = {}", unsafe {
-        (*dhcp).relay_agent_address
-    });
+    //    info!(
+    //        &ctx,
+    //        "op = {} htype = {} hlen = {} hops = {}",
+    //        unsafe { (*dhcp).operation_type },
+    //        unsafe { (*dhcp).hardware_type },
+    //        unsafe { (*dhcp).hardware_address_length },
+    //        unsafe { (*dhcp).hops }
+    //    );
+    //    info!(&ctx, "txid = {:x}", unsafe {
+    //        (*dhcp).transaction_id.to_be()
+    //    },);
+    //    info!(
+    //        &ctx,
+    //        "secs = {} flags = {:x}",
+    //        unsafe { (*dhcp).seconds_elapsed },
+    //        unsafe { (*dhcp).flags }
+    //    );
+    //    info!(&ctx, "client address = {}", unsafe {
+    //        (*dhcp).client_address
+    //    });
+    //    info!(&ctx, "your address = {}", unsafe { (*dhcp).your_address },);
+    //    info!(&ctx, "next server address = {}", unsafe {
+    //        (*dhcp).next_server_address
+    //    });
+    //    info!(&ctx, "relay agent address = {}", unsafe {
+    //        (*dhcp).relay_agent_address
+    //    });
+    //
+    //    let client_address = unsafe { (*dhcp).client_hardware_address };
+    //    info!(
+    //        &ctx,
+    //        "client hardware address = {:x}",
+    //        usize::from_be_bytes([
+    //            0,
+    //            0,
+    //            client_address[0],
+    //            client_address[1],
+    //            client_address[2],
+    //            client_address[3],
+    //            client_address[4],
+    //            client_address[5],
+    //        ])
+    //    );
+    //    info!(&ctx, "magic cookie = {:x}", unsafe {
+    //        (*dhcp).magic_cookie.to_be()
+    //    });
 
-    let client_address = unsafe { (*dhcp).client_hardware_address };
-    info!(
-        &ctx,
-        "client hardware address = {:x}",
-        usize::from_be_bytes([
-            0,
-            0,
-            client_address[0],
-            client_address[1],
-            client_address[2],
-            client_address[3],
-            client_address[4],
-            client_address[5],
-        ])
-    );
-    info!(&ctx, "magic cookie = {:x}", unsafe {
-        (*dhcp).magic_cookie.to_be()
-    });
-
-    let udp_payload_size = unsafe { (*udp).len.to_be() };
-    info!(&ctx, "packet length = {}", udp_payload_size);
+    let udp_payload_size = unsafe { (*udp).len.to_be() } - mem::size_of::<udphdr>() as u16;
 
     // 240 fixed bytes in dhcp
     // Keep looping until we get to option 12
-    let mut offset = 240;
+    let mut offset = mem::size_of::<DhcpPacket>();
+
+    info!(
+        &ctx,
+        "payload length = {} offset = {}", udp_payload_size, offset
+    );
+
+    // count is almost useless..
+    // if I remove it, bpf verifier starts crying about some thing
     let mut count = 0;
-    while offset < udp_payload_size as usize && offset < ctx.data_end() {
+
+    // TODO(ishan): Figure out a way to increase slice size
+    // Right now this crashes
+    // We should atleast have 32 bytes of space to save hostnames
+    let mut slice = [0; 20];
+
+    while offset < udp_payload_size as usize {
         let opt_type = unsafe {
             *ptr_at::<u8>(&ctx, ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset)
                 .ok_or(xdp_action::XDP_PASS)?
@@ -161,82 +175,40 @@ fn try_dhcp(ctx: XdpContext) -> Result<u32, u32> {
                 .ok_or(xdp_action::XDP_PASS)?
         };
 
-        if opt_type == 255 {
+        if opt_type == 255 || count >= 70 {
             break;
         }
 
-        if opt_type != 15 {
-            offset += 2 + length as usize;
-            info!(&ctx, "type = {} length = {}", opt_type, length);
-
-            if count >= 70 || offset >= ctx.data_end() {
-                break;
-            }
-        } else {
-            // Read body
-            info!(&ctx, "found body {} {}", opt_type, length);
-
-            //  info!(
-            //      &ctx,
-            //      "start from {}",
-            //      ctx.data() + ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + 2,
-            //  );
-
-            //            let slice: [u8; 9] = unsafe {
-            //                *ptr_at::<[u8; 9]>(&ctx, ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + 2)
-            //                    .ok_or(xdp_action::XDP_PASS)?
-            //            };
-            //
-            //
-
-            //info!(
-            //    &ctx,
-            //    "offset {}",
-            //    ctx.data() + ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + 1
-            //);
-            //            info!(&ctx, "ends at {}", ctx.data_end());
-
-            assert!(
-                ctx.data() + ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + 9 + 1
-                    < ctx.data_end()
-            );
-            //            let slice: &[u8] = unsafe {
-            //               core::slice::from_raw_parts(
-            //                  (ctx.data() + ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + 1) as *const _,
-            //                 length as usize,
-            //            )
-            //       };
-            let slice: &[u8] = unsafe {
-                core::slice::from_raw_parts(ctx.data() as *const u8, ctx.data_end() - ctx.data())
-            };
-            // let slice: [u8; 9] = unsafe {
-            //     [
-            //         *ptr_at::<u8>(&ctx, ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + 2)
-            //             .ok_or(xdp_action::XDP_PASS)?,
-            //         *ptr_at::<u8>(&ctx, ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + 3)
-            //             .ok_or(xdp_action::XDP_PASS)?,
-            //         *ptr_at::<u8>(&ctx, ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + 4)
-            //             .ok_or(xdp_action::XDP_PASS)?,
-            //         *ptr_at::<u8>(&ctx, ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + 5)
-            //             .ok_or(xdp_action::XDP_PASS)?,
-            //         *ptr_at::<u8>(&ctx, ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + 6)
-            //             .ok_or(xdp_action::XDP_PASS)?,
-            //         *ptr_at::<u8>(&ctx, ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + 7)
-            //             .ok_or(xdp_action::XDP_PASS)?,
-            //         *ptr_at::<u8>(&ctx, ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + 8)
-            //             .ok_or(xdp_action::XDP_PASS)?,
-            //         *ptr_at::<u8>(&ctx, ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + 9)
-            //             .ok_or(xdp_action::XDP_PASS)?,
-            //         *ptr_at::<u8>(&ctx, ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + 10)
-            //             .ok_or(xdp_action::XDP_PASS)?,
-            //     ]
-            // };
-
-            info!(&ctx, "slice length = {}  ", slice.len(),);
-
-            break;
-        }
+        // TODO: Check if we _really_ need this count variable
         count += 1;
+        info!(&ctx, "hi {}", opt_type);
+
+        // TODO(ishan): change this to track option 12
+        if opt_type == 15 {
+            // Read body
+
+            info!(&ctx, "length = {}", length);
+
+            for l in 0..length as usize {
+                slice[l] = unsafe {
+                    *ptr_at::<u8>(
+                        &ctx,
+                        ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + offset + l + 2,
+                    )
+                    .ok_or(xdp_action::XDP_PASS)?
+                };
+            }
+
+            for c in slice {
+                info!(&ctx, "{}", c)
+            }
+
+            for l in length..20 {
+                slice[l as usize] = 0;
+            }
+            break;
+        }
+        offset += 2 + length as usize;
     }
 
     Ok(xdp_action::XDP_PASS)
